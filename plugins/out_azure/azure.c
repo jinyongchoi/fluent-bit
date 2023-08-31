@@ -19,14 +19,17 @@
 
 #include <fluent-bit/flb_output_plugin.h>
 #include <fluent-bit/flb_http_client.h>
+#include <fluent-bit/flb_base64.h>
+#include <fluent-bit/flb_crypto.h>
+#include <fluent-bit/flb_hmac.h>
 #include <fluent-bit/flb_pack.h>
 #include <fluent-bit/flb_utils.h>
 #include <fluent-bit/flb_time.h>
+#include <fluent-bit/flb_log_event_decoder.h>
 #include <msgpack.h>
 
 #include "azure.h"
 #include "azure_conf.h"
-#include <mbedtls/base64.h>
 
 static int cb_azure_init(struct flb_output_instance *ins,
                           struct flb_config *config, void *data)
@@ -50,12 +53,7 @@ static int azure_format(const void *in_buf, size_t in_bytes,
     int i;
     int array_size = 0;
     int map_size;
-    size_t off = 0;
     double t;
-    struct flb_time tm;
-    msgpack_unpacked result;
-    msgpack_object root;
-    msgpack_object *obj;
     msgpack_object map;
     msgpack_object k;
     msgpack_object v;
@@ -68,28 +66,35 @@ static int azure_format(const void *in_buf, size_t in_bytes,
     size_t s;
     struct tm tms;
     int len;
+    struct flb_log_event_decoder log_decoder;
+    struct flb_log_event log_event;
+    int ret;
 
     /* Count number of items */
     array_size = flb_mp_count(in_buf, in_bytes);
-    msgpack_unpacked_init(&result);
+
+    ret = flb_log_event_decoder_init(&log_decoder, (char *) in_buf, in_bytes);
+
+    if (ret != FLB_EVENT_DECODER_SUCCESS) {
+        flb_plg_error(ctx->ins,
+                      "Log event decoder initialization error : %d", ret);
+
+        return -1;
+    }
 
     /* Create temporary msgpack buffer */
     msgpack_sbuffer_init(&mp_sbuf);
     msgpack_packer_init(&mp_pck, &mp_sbuf, msgpack_sbuffer_write);
     msgpack_pack_array(&mp_pck, array_size);
 
-    off = 0;
-    while (msgpack_unpack_next(&result, in_buf, in_bytes, &off) == MSGPACK_UNPACK_SUCCESS) {
-        root = result.data;
-
-        /* Get timestamp */
-        flb_time_pop_from_msgpack(&tm, &result, &obj);
-
+    while ((ret = flb_log_event_decoder_next(
+                    &log_decoder,
+                    &log_event)) == FLB_EVENT_DECODER_SUCCESS) {
         /* Create temporary msgpack buffer */
         msgpack_sbuffer_init(&tmp_sbuf);
         msgpack_packer_init(&tmp_pck, &tmp_sbuf, msgpack_sbuffer_write);
 
-        map = root.via.array.ptr[1];
+        map = *log_event.body;
         map_size = map.via.map.size;
 
         msgpack_pack_map(&mp_pck, map_size + 1);
@@ -102,20 +107,23 @@ static int azure_format(const void *in_buf, size_t in_bytes,
 
         if (ctx->time_generated == FLB_TRUE) {
             /* Append the time value as ISO 8601 */
-            gmtime_r(&tm.tm.tv_sec, &tms);
+            gmtime_r(&log_event.timestamp.tm.tv_sec, &tms);
+
             s = strftime(time_formatted, sizeof(time_formatted) - 1,
                             FLB_PACK_JSON_DATE_ISO8601_FMT, &tms);
 
             len = snprintf(time_formatted + s,
                             sizeof(time_formatted) - 1 - s,
                             ".%03" PRIu64 "Z",
-                            (uint64_t) tm.tm.tv_nsec / 1000000);
+                            (uint64_t) log_event.timestamp.tm.tv_nsec / 1000000);
+
             s += len;
             msgpack_pack_str(&mp_pck, s);
             msgpack_pack_str_body(&mp_pck, time_formatted, s);
         } else {
             /* Append the time value as millis.nanos */
-            t = flb_time_to_double(&tm);
+            t = flb_time_to_double(&log_event.timestamp);
+
             msgpack_pack_double(&mp_pck, t);
         }
 
@@ -134,13 +142,16 @@ static int azure_format(const void *in_buf, size_t in_bytes,
     record = flb_msgpack_raw_to_json_sds(mp_sbuf.data, mp_sbuf.size);
     if (!record) {
         flb_errno();
+
+        flb_log_event_decoder_destroy(&log_decoder);
         msgpack_sbuffer_destroy(&mp_sbuf);
-        msgpack_unpacked_destroy(&result);
+
         return -1;
     }
 
+    flb_log_event_decoder_destroy(&log_decoder);
+
     msgpack_sbuffer_destroy(&mp_sbuf);
-    msgpack_unpacked_destroy(&result);
 
     *out_buf = record;
     *out_size = flb_sds_len(record);
@@ -162,7 +173,7 @@ static int build_headers(struct flb_http_client *c,
     flb_sds_t str_hash;
     struct tm tm = {0};
     unsigned char hmac_hash[32] = {0};
-    mbedtls_md_context_t mctx;
+    int result;
 
     /* Format Date */
     rfc1123date = flb_sds_create_size(32);
@@ -205,18 +216,23 @@ static int build_headers(struct flb_http_client *c,
     flb_sds_cat(str_hash, FLB_AZURE_RESOURCE, sizeof(FLB_AZURE_RESOURCE) - 1);
 
     /* Authorization signature */
-    mbedtls_md_init(&mctx);
-    mbedtls_md_setup(&mctx, mbedtls_md_info_from_type(MBEDTLS_MD_SHA256) , 1);
-    mbedtls_md_hmac_starts(&mctx, (unsigned char *) ctx->dec_shared_key,
-                           flb_sds_len(ctx->dec_shared_key));
-    mbedtls_md_hmac_update(&mctx, (unsigned char *) str_hash,
-                           flb_sds_len(str_hash));
-    mbedtls_md_hmac_finish(&mctx, hmac_hash);
-    mbedtls_md_free(&mctx);
+    result = flb_hmac_simple(FLB_HASH_SHA256,
+                             (unsigned char *) ctx->dec_shared_key,
+                             flb_sds_len(ctx->dec_shared_key),
+                             (unsigned char *) str_hash,
+                             flb_sds_len(str_hash),
+                             hmac_hash,
+                             sizeof(hmac_hash));
+
+    if (result != FLB_CRYPTO_SUCCESS) {
+        flb_sds_destroy(rfc1123date);
+        flb_sds_destroy(str_hash);
+        return -1;
+    }
 
     /* Encoded hash */
-    mbedtls_base64_encode((unsigned char *) &tmp, sizeof(tmp) - 1, &olen,
-                          hmac_hash, sizeof(hmac_hash));
+    result = flb_base64_encode((unsigned char *) &tmp, sizeof(tmp) - 1, &olen,
+                               hmac_hash, sizeof(hmac_hash));
     tmp[olen] = '\0';
 
     /* Append headers */
@@ -264,7 +280,7 @@ static void cb_azure_flush(struct flb_event_chunk *event_chunk,
     char *buf_data;
     size_t buf_size;
     struct flb_azure *ctx = out_context;
-    struct flb_upstream_conn *u_conn;
+    struct flb_connection *u_conn;
     struct flb_http_client *c;
     flb_sds_t payload;
     (void) i_ins;

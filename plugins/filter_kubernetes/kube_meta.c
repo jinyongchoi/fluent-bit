@@ -20,7 +20,7 @@
 #include <fluent-bit/flb_info.h>
 #include <fluent-bit/flb_filter_plugin.h>
 #include <fluent-bit/flb_compat.h>
-#include <fluent-bit/flb_hash.h>
+#include <fluent-bit/flb_hash_table.h>
 #include <fluent-bit/flb_regex.h>
 #include <fluent-bit/flb_io.h>
 #include <fluent-bit/flb_upstream.h>
@@ -166,7 +166,7 @@ static int get_http_auth_header(struct flb_kube *ctx)
         if (ret == -1) {
             flb_plg_warn(ctx->ins, "cannot open %s", FLB_KUBE_TOKEN);
         }
-        flb_plg_info(ctx->ins, " token updated", FLB_KUBE_TOKEN);
+        flb_plg_info(ctx->ins, " token updated");
     }
     ctx->kube_token_create = time(NULL);
 
@@ -331,7 +331,8 @@ static int get_meta_file_info(struct flb_kube *ctx, const char *namespace,
 
         if (payload_size) {
             packed = flb_pack_json(payload, payload_size,
-                                   buffer, size, root_type);
+                                   buffer, size, root_type,
+                                   NULL);
         }
 
         if (payload) {
@@ -353,7 +354,7 @@ static int get_meta_info_from_request(struct flb_kube *ctx,
                                       char* uri)
 {
     struct flb_http_client *c;
-    struct flb_upstream_conn *u_conn;
+    struct flb_connection *u_conn;
     int ret;
     size_t b_sent;
     int packed;
@@ -372,6 +373,7 @@ static int get_meta_info_from_request(struct flb_kube *ctx,
     ret = refresh_token_if_needed(ctx);
     if (ret == -1) {
         flb_plg_error(ctx->ins, "failed to refresh token");
+        flb_upstream_conn_release(u_conn);
         return -1;
     }
     
@@ -403,7 +405,7 @@ static int get_meta_info_from_request(struct flb_kube *ctx,
     }
 
     packed = flb_pack_json(c->resp.payload, c->resp.payload_size,
-                                   buffer, size, root_type);
+                                   buffer, size, root_type, NULL);
 
     /* release resources */
     flb_http_client_destroy(c);
@@ -1398,7 +1400,8 @@ static int flb_kube_network_init(struct flb_kube *ctx, struct flb_config *config
         if (!ctx->tls_ca_path && !ctx->tls_ca_file) {
             ctx->tls_ca_file  = flb_strdup(FLB_KUBE_CA);
         }
-        ctx->tls = flb_tls_create(ctx->tls_verify,
+        ctx->tls = flb_tls_create(FLB_TLS_CLIENT_MODE,
+                                  ctx->tls_verify,
                                   ctx->tls_debug,
                                   ctx->tls_vhost,
                                   ctx->tls_ca_path,
@@ -1424,7 +1427,7 @@ static int flb_kube_network_init(struct flb_kube *ctx, struct flb_config *config
     }
 
     /* Remove async flag from upstream */
-    ctx->upstream->flags &= ~(FLB_IO_ASYNC);
+    flb_stream_disable_async_mode(&ctx->upstream->base);
 
     return 0;
 }
@@ -1547,9 +1550,9 @@ int flb_kube_meta_get(struct flb_kube *ctx,
     }
 
     /* Check if we have some data associated to the cache key */
-    ret = flb_hash_get(ctx->hash_table,
-                       meta->cache_key, meta->cache_key_len,
-                       (void *) &hash_meta_buf, &hash_meta_size);
+    ret = flb_hash_table_get(ctx->hash_table,
+                             meta->cache_key, meta->cache_key_len,
+                             (void *) &hash_meta_buf, &hash_meta_size);
     if (ret == -1) {
         /* Retrieve API server meta and merge with local meta */
         ret = get_and_merge_meta(ctx, meta,
@@ -1560,9 +1563,9 @@ int flb_kube_meta_get(struct flb_kube *ctx,
             return 0;
         }
 
-        id = flb_hash_add(ctx->hash_table,
-                          meta->cache_key, meta->cache_key_len,
-                          tmp_hash_meta_buf, hash_meta_size);
+        id = flb_hash_table_add(ctx->hash_table,
+                                meta->cache_key, meta->cache_key_len,
+                                tmp_hash_meta_buf, hash_meta_size);
         if (id >= 0) {
             /*
              * Release the original buffer created on extract_meta() as a new
@@ -1570,8 +1573,8 @@ int flb_kube_meta_get(struct flb_kube *ctx,
              * the outgoing buffer and size.
              */
             flb_free(tmp_hash_meta_buf);
-            flb_hash_get_by_id(ctx->hash_table, id, meta->cache_key,
-                               &hash_meta_buf, &hash_meta_size);
+            flb_hash_table_get_by_id(ctx->hash_table, id, meta->cache_key,
+                                     &hash_meta_buf, &hash_meta_size);
         }
     }
 

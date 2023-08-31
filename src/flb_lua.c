@@ -209,18 +209,18 @@ static int lua_isinteger(lua_State *L, int index)
  * If we update luajit which is based Lua 5.2+,
  * this function should be removed.
 */
-static int lua_table_maxn(lua_State *l)
+static int lua_table_maxn(lua_State *l, int index)
 {
 #if defined(LUA_VERSION_NUM) && LUA_VERSION_NUM < 520
     int ret = -1;
-    if (lua_type(l, -1) != LUA_TTABLE) {
+    if (lua_type(l, index) != LUA_TTABLE) {
         return -1;
     }
 
     lua_getglobal(l, "table");
     lua_getfield(l, -1, "maxn");
     lua_remove(l, -2);    /* remove table (lua_getglobal(L, "table")) */
-    lua_pushvalue(l, -2); /* copy record to top of stack */
+    lua_pushvalue(l, index); /* copy record to top of stack */
     ret = lua_pcall(l, 1, 1, 0);
     if (ret < 0) {
         flb_error("[filter_lua] failed to exec table.maxn ret=%d", ret);
@@ -239,24 +239,26 @@ static int lua_table_maxn(lua_State *l)
 
     return ret;
 #else
-    return (int)lua_rawlen(l, 1);
+    return (int)lua_rawlen(l, index);
 #endif
 }
 
-int flb_lua_arraylength(lua_State *l)
+int flb_lua_arraylength(lua_State *l, int index)
 {
     lua_Integer n;
     int count = 0;
     int max = 0;
     int ret = 0;
 
-    ret = lua_table_maxn(l);
+    index = flb_lua_absindex(l, index);
+
+    ret = lua_table_maxn(l, index);
     if (ret > 0) {
         return ret;
     }
 
     lua_pushnil(l);
-    while (lua_next(l, -2) != 0) {
+    while (lua_next(l, index) != 0) {
         if (lua_type(l, -2) == LUA_TNUMBER) {
             n = lua_tonumber(l, -2);
             if (n > 0) {
@@ -269,8 +271,9 @@ int flb_lua_arraylength(lua_State *l)
         lua_pop(l, 2);
         return -1;
     }
-    if (max != count)
+    if (max != count) {
         return -1;
+    }
     return max;
 }
 
@@ -442,7 +445,7 @@ void flb_lua_tompack(lua_State *l,
                 mpack_write_false(writer);
             break;
         case LUA_TTABLE:
-            len = flb_lua_arraylength(l);
+            len = flb_lua_arraylength(l, -1 + index);
             if (len > 0) {
                 mpack_write_tag(writer, mpack_tag_array(len));
                 for (i = 1; i <= len; i++) {
@@ -533,7 +536,7 @@ void flb_lua_tomsgpack(lua_State *l,
                 msgpack_pack_false(pck);
             break;
         case LUA_TTABLE:
-            len = flb_lua_arraylength(l);
+            len = flb_lua_arraylength(l, -1 + index);
             if (len > 0) {
                 msgpack_pack_array(pck, len);
                 for (i = 1; i <= len; i++) {
@@ -583,4 +586,88 @@ void flb_lua_tomsgpack(lua_State *l,
            /* cannot serialize */
            break;
     }
+}
+
+static void print_lua_value(FILE *out, lua_State *l, int index, int depth)
+{
+    int i;
+    int i_depth;
+    int type;
+    size_t len_s;
+    double val_d;
+    int64_t val_i;
+    int len_t;
+
+    index = flb_lua_absindex(l, index);
+
+    type = lua_type(l, index);
+    fprintf(out, "%s:", lua_typename(l, type));
+    switch(type){
+    case LUA_TSTRING:
+        fprintf(out, " %s\n", lua_tolstring(l,index, &len_s));
+        break;
+    case LUA_TBOOLEAN:
+        fprintf(out, " %s\n", lua_toboolean(l, index) ? "true":"false");
+        break;
+    case LUA_TNUMBER:
+        val_i = lua_tointeger(l, index);
+        val_d = lua_tonumber(l, index);
+        fprintf(out, " d=%lf i=%ld\n", val_d, val_i);
+        break;
+    case LUA_TTABLE:
+        len_t = flb_lua_arraylength(l, index);
+        fprintf(out, " size=%d ", len_t);
+        if (len_t > 0) {
+            fprintf(out, "array\n");
+            for (i=1; i<=len_t; i++) {
+                for (i_depth=0; i_depth<depth; i_depth++) {
+                    fputc(' ', stdout);
+                }
+                fprintf(out, "%03d: ", i);
+                lua_rawgeti(l, index, i);
+                print_lua_value(out, l, -1, depth+2);
+                lua_pop(l, 1);
+            }
+            fprintf(out, "\n");
+            break;
+        }
+
+        lua_pushnil(l);
+        fprintf(out, "map\n");
+        while (lua_next(l, index) != 0) {
+            for (i_depth=0; i_depth<depth; i_depth++) {
+                fputc(' ', stdout);
+            }
+            fprintf(out, "val: ");
+            print_lua_value(out, l,-1, depth+2); /* val */
+            for (i_depth=0; i_depth<depth; i_depth++) {
+                fputc(' ', stdout);
+            }
+            fprintf(out, "key: ");
+            print_lua_value(out, l,-2, depth+2); /* key */
+            lua_pop(l, 1); /* pop value */
+        }
+
+        break;
+    default:
+        fprintf(out, " (not supported value)\n");
+    }
+}
+
+void flb_lua_dump_stack(FILE *out, lua_State *l)
+{
+    int top;
+    int i;
+
+    top = lua_gettop(l);
+    if (top == 0) {
+        fprintf(out, "stack is empty\n");
+        return;
+    }
+    fprintf(out, "top index =%d ======\n", top);
+    for (i=top; i>=1; i--) {
+        fprintf(out, "%03d: ", i);
+        print_lua_value(out, l, i, 2);
+    }
+    fprintf(out, "======\n");
 }

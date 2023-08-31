@@ -59,8 +59,8 @@ static int sp_config_file(struct flb_config *config, struct flb_sp *sp,
                           const char *file)
 {
     int ret;
-    char *name;
-    char *exec;
+    flb_sds_t name;
+    flb_sds_t exec;
     char *cfg = NULL;
     char tmp[PATH_MAX + 1];
     struct stat st;
@@ -107,14 +107,14 @@ static int sp_config_file(struct flb_config *config, struct flb_sp *sp,
         exec = NULL;
 
         /* name */
-        name = flb_cf_section_property_get(cf, section, "name");
+        name = flb_cf_section_property_get_string(cf, section, "name");
         if (!name) {
             flb_error("[sp] task 'name' not found in file '%s'", cfg);
             goto fconf_error;
         }
 
         /* exec */
-        exec = flb_cf_section_property_get(cf, section, "exec");
+        exec = flb_cf_section_property_get_string(cf, section, "exec");
         if (!exec) {
             flb_error("[sp] task '%s' don't have an 'exec' command", name);
             goto fconf_error;
@@ -125,12 +125,22 @@ static int sp_config_file(struct flb_config *config, struct flb_sp *sp,
         if (!task) {
             goto fconf_error;
         }
+        flb_sds_destroy(name);
+        flb_sds_destroy(exec);
+        name = NULL;
+        exec = NULL;
     }
 
     flb_cf_destroy(cf);
     return 0;
 
 fconf_error:
+    if (name) {
+        flb_sds_destroy(name);
+    }
+    if (exec) {
+        flb_sds_destroy(exec);
+    }
     flb_cf_destroy(cf);
     return -1;
 }
@@ -1383,7 +1393,6 @@ int sp_process_data_aggr(const char *buf_data, size_t buf_size,
     int ret;
     int map_size;
     int key_id;
-    int values_found;
     size_t off;
     int64_t ival;
     double dval;
@@ -1445,7 +1454,6 @@ int sp_process_data_aggr(const char *buf_data, size_t buf_size,
 
         nums = aggr_node->nums;
 
-        values_found = 0;
         /* Iterate each map key and see if it matches any command key */
         for (i = 0; i < map_size; i++) {
             key = map.via.map.ptr[i].key;
@@ -1481,8 +1489,6 @@ int sp_process_data_aggr(const char *buf_data, size_t buf_size,
                     key_id++;
                     continue;
                 }
-
-                values_found++;
 
                 /*
                  * Convert value to a numeric representation only if key has an
