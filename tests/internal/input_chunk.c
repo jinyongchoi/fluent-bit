@@ -544,18 +544,15 @@ void flb_test_input_chunk_correct_total_records(void)
 }
 
 /*
- * Test: Ring buffer data should not be lost during shutdown when input is paused.
+ * Test: input_chunk_append_raw() should bypass pause check during shutdown.
  *
- * This test simulates the scenario where:
- * 1. A threaded input plugin writes data to the ring buffer
- * 2. The input gets paused (e.g., due to storage overlimit)
- * 3. Shutdown is triggered
- * 4. Data in ring buffer should still be flushed (not lost)
+ * This test verifies that when is_shutting_down=TRUE, the pause check
+ * in input_chunk_append_raw() is bypassed, allowing data to be written
+ * to chunks even when the input is paused.
  *
- * The fix ensures that during shutdown (is_shutting_down=TRUE), the pause check
- * is bypassed in both ring_buffer_collector() and input_chunk_append_raw().
+ * This is for non-threaded input plugins that call input_chunk_append_raw() directly.
  */
-void flb_test_input_chunk_ring_buffer_shutdown()
+void flb_test_input_chunk_shutdown_bypass_pause()
 {
     int ret;
     size_t records;
@@ -674,6 +671,144 @@ void flb_test_input_chunk_ring_buffer_shutdown()
     flb_config_exit(cfg);
 }
 
+/*
+ * Test: Ring buffer collector should bypass pause check during shutdown.
+ *
+ * This test verifies that when is_shutting_down=TRUE, the pause check
+ * in ring_buffer_collector() is bypassed, allowing data in the ring buffer
+ * to be flushed to chunks even when the input is paused.
+ *
+ * This is for threaded input plugins that use the ring buffer path.
+ */
+void flb_test_input_chunk_ring_buffer_shutdown()
+{
+    int ret;
+    size_t records;
+    struct flb_config *cfg;
+    struct flb_input_instance *i_ins;
+    struct flb_output_instance *o_ins;
+    struct cio_ctx *cio;
+    struct cio_options opts = {0};
+    struct mk_event_loop *evl;
+    struct mk_list *tmp;
+    struct mk_list *head;
+    struct flb_input_chunk *ic;
+    struct flb_task *task;
+    msgpack_sbuffer mp_sbuf;
+    char buf[1024];
+    size_t initial_chunks;
+    size_t final_chunks;
+
+    flb_init_env();
+    cfg = flb_config_init();
+    evl = mk_event_loop_create(256);
+    TEST_CHECK(evl != NULL);
+    cfg->evl = evl;
+
+    flb_log_create(cfg, FLB_LOG_STDERR, FLB_LOG_DEBUG, NULL);
+
+    /* Create input instance */
+    i_ins = flb_input_new(cfg, "dummy", NULL, FLB_TRUE);
+    TEST_CHECK(i_ins != NULL);
+    i_ins->storage_type = CIO_STORE_FS;
+
+    /* Enable threaded mode to use ring buffer path */
+    i_ins->is_threaded = FLB_TRUE;
+
+    /* Setup storage */
+    cio_options_init(&opts);
+    opts.root_path = "/tmp/input-chunk-ring-buffer-shutdown-threaded";
+    opts.log_cb = log_cb;
+    opts.log_level = CIO_LOG_DEBUG;
+    opts.flags = CIO_OPEN;
+
+    cio = cio_create(&opts);
+    TEST_CHECK(cio != NULL);
+    flb_storage_input_create(cio, i_ins);
+    flb_input_init_all(cfg);
+
+    /* Create output instance */
+    o_ins = flb_output_new(cfg, "null", NULL, FLB_TRUE);
+    o_ins->id = 1;
+    TEST_CHECK(o_ins != NULL);
+    flb_output_set_property(o_ins, "match", "*");
+
+    TEST_CHECK(flb_router_io_set(cfg) != -1);
+
+    /* Generate test data */
+    memset((void *)buf, 0x42, sizeof(buf));
+    msgpack_sbuffer_init(&mp_sbuf);
+    gen_buf(&mp_sbuf, buf, sizeof(buf));
+    records = flb_mp_count(buf, sizeof(buf));
+
+    /* Count initial chunks */
+    initial_chunks = 0;
+    mk_list_foreach(head, &i_ins->chunks) {
+        initial_chunks++;
+    }
+    flb_info("[test] initial chunks count: %zu", initial_chunks);
+
+    /* Simulate pause condition */
+    i_ins->mem_buf_status = FLB_INPUT_PAUSED;
+    flb_info("[test] input paused");
+
+    /* Append data while paused - goes to ring buffer (threaded mode) */
+    cfg->is_shutting_down = FLB_FALSE;
+    ret = flb_input_chunk_append_raw(i_ins, FLB_INPUT_LOGS, records,
+                                     "test", 4, (void *)buf, sizeof(buf));
+    /* In threaded mode, append_to_ring_buffer() succeeds (no pause check there) */
+    TEST_CHECK_(ret == 0, "append to ring buffer should succeed even when paused");
+
+    /* Manually call ring_buffer_collector - should skip due to pause */
+    flb_input_chunk_ring_buffer_collector(cfg, NULL);
+
+    /* Count chunks after collector (should be same - data stuck in ring buffer) */
+    size_t chunks_after_paused_collect = 0;
+    mk_list_foreach(head, &i_ins->chunks) {
+        chunks_after_paused_collect++;
+    }
+    flb_info("[test] chunks after paused collect: %zu", chunks_after_paused_collect);
+    TEST_CHECK_(chunks_after_paused_collect == initial_chunks,
+                "collector should not process data when paused (before fix)");
+
+    /* Now simulate shutdown */
+    cfg->is_shutting_down = FLB_TRUE;
+    flb_info("[test] shutdown initiated (is_shutting_down=TRUE)");
+
+    /* Call ring_buffer_collector again - should process data during shutdown */
+    flb_input_chunk_ring_buffer_collector(cfg, NULL);
+
+    /* Count final chunks */
+    final_chunks = 0;
+    mk_list_foreach(head, &i_ins->chunks) {
+        final_chunks++;
+    }
+    flb_info("[test] final chunks count: %zu", final_chunks);
+
+    /* Verify data was flushed from ring buffer to chunks during shutdown */
+    TEST_CHECK_(final_chunks > initial_chunks,
+                "ring buffer data should be flushed to chunks during shutdown");
+
+    msgpack_sbuffer_destroy(&mp_sbuf);
+
+    /* Cleanup */
+    mk_list_foreach_safe(head, tmp, &i_ins->tasks) {
+        task = mk_list_entry(head, struct flb_task, _head);
+        flb_task_destroy(task, FLB_TRUE);
+    }
+
+    mk_list_foreach_safe(head, tmp, &i_ins->chunks) {
+        ic = mk_list_entry(head, struct flb_input_chunk, _head);
+        flb_input_chunk_destroy(ic, FLB_TRUE);
+    }
+
+    cio_destroy(cio);
+    flb_router_exit(cfg);
+    flb_input_exit_all(cfg);
+    flb_output_exit(cfg);
+    flb_config_exit(cfg);
+}
+
 
 /* Test list */
 TEST_LIST = {
@@ -682,6 +817,7 @@ TEST_LIST = {
     {"input_chunk_dropping_chunks",    flb_test_input_chunk_dropping_chunks},
     {"input_chunk_fs_chunk_size_real", flb_test_input_chunk_fs_chunks_size_real},
     {"input_chunk_correct_total_records", flb_test_input_chunk_correct_total_records},
+    {"input_chunk_shutdown_bypass_pause", flb_test_input_chunk_shutdown_bypass_pause},
     {"input_chunk_ring_buffer_shutdown", flb_test_input_chunk_ring_buffer_shutdown},
     {NULL, NULL}
 };

@@ -2667,11 +2667,17 @@ static int input_chunk_append_raw(struct flb_input_instance *in,
         }
     }
 
-    /* Check if the input plugin has been paused */
-    if (flb_input_buf_paused(in) == FLB_TRUE) {
-        flb_debug("[input chunk] %s is paused, cannot append records",
-                  flb_input_name(in));
-        return -1;
+    /*
+     * Check if the input plugin has been paused.
+     * During shutdown (is_shutting_down=TRUE), we must accept data to flush
+     * remaining ring buffer contents, so we skip the pause check.
+     */
+    if (in->config->is_shutting_down == FLB_FALSE) {
+        if (flb_input_buf_paused(in) == FLB_TRUE) {
+            flb_debug("[input chunk] %s is paused, cannot append records",
+                      flb_input_name(in));
+            return -1;
+        }
     }
 
     if (buf_size == 0) {
@@ -3036,6 +3042,7 @@ retry:
 void flb_input_chunk_ring_buffer_cleanup(struct flb_input_instance *ins)
 {
     int ret;
+    int destroyed_count = 0;
     struct input_chunk_raw *cr;
 
     if (!ins->rb) {
@@ -3046,7 +3053,13 @@ void flb_input_chunk_ring_buffer_cleanup(struct flb_input_instance *ins)
         if (cr) {
             destroy_chunk_raw(cr);
             cr = NULL;
+            destroyed_count++;
         }
+    }
+
+    if (destroyed_count > 0) {
+        flb_info("[ring_buffer] cleanup END: input=%s destroyed_count=%d",
+                 flb_input_name(ins), destroyed_count);
     }
 }
 
@@ -3063,8 +3076,16 @@ void flb_input_chunk_ring_buffer_collector(struct flb_config *ctx, void *data)
         cr = NULL;
 
         while (1) {
-            if (flb_input_buf_paused(ins) == FLB_TRUE) {
-                break;
+            /*
+             * During normal operation, respect the pause state to maintain
+             * backpressure. However, during shutdown (is_shutting_down=TRUE),
+             * we must flush all remaining data in the ring buffer to prevent
+             * data loss, so we skip the pause check.
+             */
+            if (ctx->is_shutting_down == FLB_FALSE) {
+                if (flb_input_buf_paused(ins) == FLB_TRUE) {
+                    break;
+                }
             }
 
             ret = flb_ring_buffer_read(ins->rb,
