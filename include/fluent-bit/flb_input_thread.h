@@ -89,6 +89,13 @@ struct flb_input_thread_instance {
     int input_coro_id;
     struct mk_list input_coro_list;
     struct mk_list input_coro_list_destroy;
+
+    /*
+     * Pause state flag for shutdown synchronization.
+     * Set to 1 when thread completes pause processing.
+     * Checked by main thread to ensure safe shutdown.
+     */
+    volatile int is_paused;
 };
 
 int flb_input_thread_instance_init(struct flb_config *config,

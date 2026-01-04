@@ -78,10 +78,18 @@ static inline int handle_input_event(flb_pipefd_t fd, struct flb_input_instance 
             if (ins->p->cb_pause && ins->context) {
                 ins->p->cb_pause(ins->context, ins->config);
             }
+            /* Mark thread as paused for shutdown synchronization */
+            if (ins->is_threaded && ins->thi) {
+                ins->thi->is_paused = 1;
+            }
         }
         else if (operation == FLB_INPUT_THREAD_RESUME) {
             if (ins->p->cb_resume) {
                 ins->p->cb_resume(ins->context, ins->config);
+            }
+            /* Clear paused flag on resume */
+            if (ins->is_threaded && ins->thi) {
+                ins->thi->is_paused = 0;
             }
         }
         else if (operation == FLB_INPUT_THREAD_EXIT) {

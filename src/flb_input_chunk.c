@@ -2413,6 +2413,7 @@ size_t flb_input_chunk_set_limits(struct flb_input_instance *in)
     if (flb_input_chunk_is_mem_overlimit(in) == FLB_FALSE &&
         in->config->is_running == FLB_TRUE &&
         in->config->is_ingestion_active == FLB_TRUE &&
+        in->config->is_shutting_down == FLB_FALSE &&
         in->mem_buf_status == FLB_INPUT_PAUSED) {
         in->mem_buf_status = FLB_INPUT_RUNNING;
         if (in->p->cb_resume) {
@@ -2426,6 +2427,7 @@ size_t flb_input_chunk_set_limits(struct flb_input_instance *in)
     if (flb_input_chunk_is_storage_overlimit(in) == FLB_FALSE &&
         in->config->is_running == FLB_TRUE &&
         in->config->is_ingestion_active == FLB_TRUE &&
+        in->config->is_shutting_down == FLB_FALSE &&
         in->storage_buf_status == FLB_INPUT_PAUSED) {
         in->storage_buf_status = FLB_INPUT_RUNNING;
         if (in->p->cb_resume) {
@@ -3306,4 +3308,24 @@ void flb_input_chunk_update_output_instances(struct flb_input_chunk *ic,
                       o_ins->name, chunk_size, o_ins->fs_chunks_size);
         }
     }
+}
+
+/*
+ * Calculate total size of all ring buffers across all threaded input instances.
+ * Returns 0 if no data is pending in ring buffers.
+ */
+size_t flb_input_chunk_total_ring_buffers_size(struct flb_config *config)
+{
+    size_t total_size = 0;
+    struct mk_list *head;
+    struct flb_input_instance *ins;
+
+    mk_list_foreach(head, &config->inputs) {
+        ins = mk_list_entry(head, struct flb_input_instance, _head);
+        if (flb_input_is_threaded(ins) && ins->rb) {
+            total_size += flb_ring_buffer_get_used(ins->rb);
+        }
+    }
+
+    return total_size;
 }
