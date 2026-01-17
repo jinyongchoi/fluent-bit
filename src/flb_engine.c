@@ -1207,15 +1207,18 @@ int flb_engine_start(struct flb_config *config)
                         flb_task_running_print(config);
                     }
 
-                    ret = tasks + mem_chunks + fs_chunks + (rb_size > 0);
+                    ret = tasks + mem_chunks + fs_chunks;
 
-                    if (rb_size > 0) {
-                        flb_info("[engine] ring buffer pending: %zu bytes", rb_size);
-                        flb_input_chunk_ring_buffer_collector(config, NULL);
+                    if (config->thread_shutdown_flush == FLB_TRUE) {
+                        if (rb_size > 0) {
+                            ret++;
+                            flb_info("[engine] ring buffer pending: %zu bytes", rb_size);
+                            flb_input_chunk_ring_buffer_collector(config, NULL);
+                        }
                     }
 
                     /* Check thread pause only when all other work is done */
-                    if (ret == 0) {
+                    if (ret == 0 && config->thread_shutdown_flush == FLB_TRUE) {
                         if (!all_threaded_inputs_paused(config)) {
                             ret++;
                             flb_debug("[engine] waiting for threaded inputs to complete pause");
