@@ -250,6 +250,9 @@ static struct flb_input_thread_instance *input_thread_instance_create(struct flb
     thi->init_status = 0;
     pthread_mutex_init(&thi->init_mutex, NULL);
 
+    /* Initialize pause state flag (not paused initially) */
+    thi->is_paused = FLB_FALSE;
+
     /* init condition */
     pthread_cond_init(&thi->init_condition, NULL);
 
