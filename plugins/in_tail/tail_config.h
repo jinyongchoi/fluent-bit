@@ -83,6 +83,12 @@ struct flb_tail_config {
 #ifdef FLB_HAVE_REGEX
     struct flb_regex *tag_regex;/* path to tag regex           */
 #endif
+
+    /* Tag split for round-robin distribution */
+    int tag_split_count;            /* 0 = disabled, N = splits     */
+    uint64_t tag_split_idx;         /* round-robin counter (atomic) */
+    flb_sds_t *tag_splits;          /* pre-built tag array          */
+    size_t *tag_split_lens;         /* tag length array             */
     int refresh_interval_sec;  /* seconds to re-scan           */
     long refresh_interval_nsec;/* nanoseconds to re-scan       */
     int read_newly_discovered_files_from_head; /* read new files from head after startup */

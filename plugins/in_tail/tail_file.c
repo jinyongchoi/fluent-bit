@@ -412,10 +412,28 @@ static int ml_stream_buffer_append(struct flb_tail_file *file, char *buf_data, s
 
 static int ml_stream_buffer_flush(struct flb_tail_config *ctx, struct flb_tail_file *file)
 {
+    uint64_t idx;
+    int split_idx;
+    size_t use_tag_len;
+    const char *use_tag;
+
     if (file->ml_log_event_encoder->output_length > 0) {
+        /* Use split tag if enabled, otherwise use file tag */
+        if (ctx->tag_split_count > 0) {
+            idx = __atomic_fetch_add(&ctx->tag_split_idx, 1,
+                                     __ATOMIC_RELAXED);
+            split_idx = idx % ctx->tag_split_count;
+            use_tag = ctx->tag_splits[split_idx];
+            use_tag_len = ctx->tag_split_lens[split_idx];
+        }
+        else {
+            use_tag = file->tag_buf;
+            use_tag_len = file->tag_len;
+        }
+
         flb_input_log_append(ctx->ins,
-                             file->tag_buf,
-                             file->tag_len,
+                             use_tag,
+                             use_tag_len,
                              file->ml_log_event_encoder->output_buffer,
                              file->ml_log_event_encoder->output_length);
 
@@ -497,6 +515,10 @@ static int process_content(struct flb_tail_file *file, size_t *bytes)
     struct flb_time out_time = {0};
     struct flb_tail_config *ctx;
     char *decoded = NULL;
+    uint64_t tag_idx;
+    int split_idx;
+    size_t use_tag_len;
+    const char *use_tag;
 #ifdef FLB_HAVE_UNICODE_ENCODER
     size_t decoded_len;
 #endif
@@ -800,10 +822,23 @@ truncation_end:
         }
 
         if (file->sl_log_event_encoder->output_length > 0) {
+            /* Use split tag if enabled, otherwise use file tag */
+            if (ctx->tag_split_count > 0) {
+                tag_idx = __atomic_fetch_add(&ctx->tag_split_idx, 1,
+                                             __ATOMIC_RELAXED);
+                split_idx = tag_idx % ctx->tag_split_count;
+                use_tag = ctx->tag_splits[split_idx];
+                use_tag_len = ctx->tag_split_lens[split_idx];
+            }
+            else {
+                use_tag = file->tag_buf;
+                use_tag_len = file->tag_len;
+            }
+
             flb_input_log_append_records(ctx->ins,
                                          lines,
-                                         file->tag_buf,
-                                         file->tag_len,
+                                         use_tag,
+                                         use_tag_len,
                                          file->sl_log_event_encoder->output_buffer,
                                          file->sl_log_event_encoder->output_length);
 

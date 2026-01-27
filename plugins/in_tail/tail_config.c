@@ -335,6 +335,63 @@ struct flb_tail_config *flb_tail_config_create(struct flb_input_instance *ins,
         ctx->dynamic_tag = FLB_TRUE;
     }
 
+    /* Initialize tag splits for round-robin distribution */
+    if (ctx->tag_split_count < 0 || ctx->tag_split_count > 128) {
+        flb_plg_error(ctx->ins,
+                      "invalid tag_split_count=%d, must be 0~128",
+                      ctx->tag_split_count);
+        flb_tail_config_destroy(ctx);
+        return NULL;
+    }
+
+    if (ctx->tag_split_count > 0) {
+        /* tag_split_count cannot be used with dynamic tags */
+        if (ctx->dynamic_tag == FLB_TRUE) {
+            flb_plg_error(ctx->ins,
+                          "tag_split_count cannot be used with dynamic tags "
+                          "(wildcards or tag_regex)");
+            flb_tail_config_destroy(ctx);
+            return NULL;
+        }
+
+        ctx->tag_splits = flb_calloc(ctx->tag_split_count,
+                                     sizeof(flb_sds_t));
+        if (!ctx->tag_splits) {
+            flb_errno();
+            flb_tail_config_destroy(ctx);
+            return NULL;
+        }
+
+        ctx->tag_split_lens = flb_calloc(ctx->tag_split_count,
+                                         sizeof(size_t));
+        if (!ctx->tag_split_lens) {
+            flb_errno();
+            flb_tail_config_destroy(ctx);
+            return NULL;
+        }
+
+        for (i = 0; i < ctx->tag_split_count; i++) {
+            ctx->tag_splits[i] = flb_sds_create_size(strlen(ins->tag) + 16);
+            if (!ctx->tag_splits[i]) {
+                flb_errno();
+                flb_tail_config_destroy(ctx);
+                return NULL;
+            }
+            ret = flb_sds_printf(&ctx->tag_splits[i], "%s.%d", ins->tag, i);
+            if (ret == -1) {
+                flb_plg_error(ctx->ins,
+                              "failed to format tag split for index %d", i);
+                flb_tail_config_destroy(ctx);
+                return NULL;
+            }
+            ctx->tag_split_lens[i] = flb_sds_len(ctx->tag_splits[i]);
+        }
+
+        ctx->tag_split_idx = 0;
+        flb_plg_info(ctx->ins, "tag split enabled with %d splits",
+                     ctx->tag_split_count);
+    }
+
 #ifdef FLB_HAVE_SQLDB
     /* Database options (needs to be set before the context) */
     tmp = flb_input_get_property("db.sync", ins);
@@ -519,6 +576,7 @@ struct flb_tail_config *flb_tail_config_create(struct flb_input_instance *ins,
 
 int flb_tail_config_destroy(struct flb_tail_config *config)
 {
+    int i;
 
 #ifdef FLB_HAVE_PARSER
     flb_tail_mult_destroy(config);
@@ -561,6 +619,19 @@ int flb_tail_config_destroy(struct flb_tail_config *config)
 
     if (config->ignored_file_sizes != NULL) {
         flb_hash_table_destroy(config->ignored_file_sizes);
+    }
+
+    /* Destroy tag splits */
+    if (config->tag_splits) {
+        for (i = 0; i < config->tag_split_count; i++) {
+            if (config->tag_splits[i]) {
+                flb_sds_destroy(config->tag_splits[i]);
+            }
+        }
+        flb_free(config->tag_splits);
+    }
+    if (config->tag_split_lens) {
+        flb_free(config->tag_split_lens);
     }
 
     flb_free(config);

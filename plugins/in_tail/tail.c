@@ -753,6 +753,14 @@ static struct flb_config_map config_map[] = {
     },
 #endif
 
+    {
+     FLB_CONFIG_MAP_INT, "tag_split_count", "0",
+     0, FLB_TRUE, offsetof(struct flb_tail_config, tag_split_count),
+     "number of tag splits for round-robin distribution (0=disabled, max 128). "
+     "When set to N (> 0), tags are generated as tag.0, tag.1, ... tag.N-1. "
+     "Use this to distribute logs across multiple OUTPUT instances."
+    },
+
 #ifdef FLB_HAVE_SQLDB
     {
      FLB_CONFIG_MAP_STR, "db", NULL,
