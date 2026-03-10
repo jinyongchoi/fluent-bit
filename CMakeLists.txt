@@ -1638,6 +1638,8 @@ set(CPACK_RPM_RUNTIME_USER_FILELIST
   "%ignore /lib"
   "%ignore /lib/systemd"
   "%ignore /lib/systemd/system"
+  "%ignore /usr/lib/systemd"
+  "%ignore /usr/lib/systemd/system"
   "%ignore /lib64"
   "%ignore /lib64/pkgconfig"
   "%ignore /usr/local"
